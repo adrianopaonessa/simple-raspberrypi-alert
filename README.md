@@ -101,6 +101,7 @@ Connect the Common Anode RGB LED and the push button to your Raspberry Pi's GPIO
     * Ensure you have a C++ compiler (e.g., MinGW, MSVC) installed on your Windows PC.
     * Compile your `server_notifier.cpp` file to create the `server_notifier.exe` executable.
     * **Move `server_notifier.exe`** to a permanent, dedicated location on your PC, for example, `C:\SimpleAlert\`.
+    * **Place the `toast_notification.ps1` script in the same `C:\SimpleAlert\` directory** alongside `server_notifier.exe`.
 
 2.  **Choose an Auto-Start Method for the Server:**
     You have two primary options to make your server run automatically when Windows boots.
