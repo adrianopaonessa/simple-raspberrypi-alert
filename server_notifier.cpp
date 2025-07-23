@@ -56,7 +56,7 @@ void ShowToastNotification(const std::string& title, const std::string& message)
     // -ExecutionPolicy Bypass: Allows running scripts regardless of policy.
     // -File: Specifies the script file to run.
     // -Title and -Message: Custom parameters for the toast notification.
-    std::wstring args = L"-NoProfile -ExectionPolicy Bypass -File \"" +
+    std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" +
                         ws_powershellScriptPath + L"\" -Title \"" + ws_title +
                         L"\" -Message \"" + ws_message + L"\"";
     
