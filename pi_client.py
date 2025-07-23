@@ -2,9 +2,12 @@ import RPi.GPIO as GPIO
 import time
 import socket
 
+GPIO.setwarnings(False)
+
 # Button GPIO Config
 BUTTON_PIN = 17 # GPIO pin to which the button is connected
 GPIO.setmode(GPIO.BCM) # Sets the pin numbering mode to BCM (Broadcom SOC channel)
+GPIO.cleanup()
 GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP) # Set up BUTTON_PIN as input with an internal pull-up resistor
 
 # RGB LED GPIO Config
@@ -46,10 +49,9 @@ def set_rgb_color(red, green, blue):
         This function assumes that the LED is active-low, meaning a LOW signal turns the LED on.
         The GPIO pins LED_RED_PIN, LED_GREEN_PIN, and LED_BLUE_PIN must be defined and configured as outputs.
     """
-
     GPIO.output(LED_RED_PIN, GPIO.LOW if red == 1 else GPIO.HIGH)
-    GPIO.output(LED_GREEN_PIN, GPIO.LOW if red == 1 else GPIO.HIGH)
-    GPIO.output(LED_BLUE_PIN, GPIO.LOW if red == 1 else GPIO.HIGH)
+    GPIO.output(LED_GREEN_PIN, GPIO.LOW if green == 1 else GPIO.HIGH)
+    GPIO.output(LED_BLUE_PIN, GPIO.LOW if blue == 1 else GPIO.HIGH)
 
 
 def turn_off_rgb():
@@ -71,21 +73,27 @@ def n_blink_led(red, green, blue, n_blinks = 3, blink_duration = 0.2):
         n_blinks (int, optional): Number of times to blink the LED. Defaults to 3.
         blink_duration (float, optional): Duration (in seconds) for each blink on and off. Defaults to 0.2.
     """
+    turn_off_rgb()
+
     for _ in range(n_blinks):
         set_rgb_color(red, green, blue)
         time.sleep(blink_duration)
         turn_off_rgb()
         time.sleep(blink_duration)
+    
+    turn_off_rgb()
 
 
 def connect_to_server():
     global s
+    global last_idle_blink_time
 
     # Try to connect until successful connection
     while True:
         print(f"- Attempting to connect to the server {SERVER_HOST}:{SERVER_PORT}")
 
         # Turns on the red LED to indicate a connection attempt or connection error
+        turn_off_rgb()
         set_rgb_color(1, 0, 0)
 
         try:
@@ -99,17 +107,19 @@ def connect_to_server():
 
             print("> Connection with the server established!")
             
-            triple_blink(0, 1, 0) # Green blink
+            n_blink_led(0, 1, 0) # Green blink
             last_idle_blink_time = time.time() # Update the last blink time
 
             # Returns the connected socket
             return s
         except socket.error as e:
             print(f"> Connection error: {e}. Retrying in 5 seconds.")
+            turn_off_rgb()
             set_rgb_color(1, 0, 0) # Set the RGB LED to red
             time.sleep(5)
         except Exception as e:
             print("> Unexpected error during connection: {e}. Retrying in 5 seconds.")
+            turn_off_rgb()
             set_rgb_color(1, 0, 0) # Set the RGB LED to red
             time.sleep(5)
 
@@ -132,16 +142,25 @@ def throw_socket_error(message, error = "", red = 1, green = 0, blue = 0, blink_
         Blinks the LED with the specified color and pattern.
         Closes the socket connection.
     """
+    global s
     print(f"> {message} {error}")
     n_blink_led(red, green, blue, blink_times, blink_duration)
-    s.close()
+    if s:
+        s.close()
     s = None
 
 # Main script loop
 turn_off_rgb()
 
+if SERVER_HOST == "YOUR HOST IP":
+    n_blink_led(1, 0, 0, 10, 0.1)
+    print("> YOU MUST set the host IP before running the script!")
+    exit()
+
 try:
     while True:
+        turn_off_rgb()
+        
         # Check for socket connection
         if s is None:
             s = connect_to_server() # Try to connect
@@ -158,6 +177,7 @@ try:
                 s.sendall(MESSAGE.encode(MESSAGE_ENCODE))
                 print(f"> Message sent: '{MESSAGE}'")
 
+                turn_off_rgb()
                 set_rgb_color(0, 1, 0) # Green led
                 time.sleep(2)
                 turn_off_rgb()
