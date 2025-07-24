@@ -1,171 +1,253 @@
-#include <iostream>    // Provides standard input/output stream objects
-#include <string>      // Provides string class and related functions
-#include <WinSock2.h>  // Provides Windows Sockets API for network programming
-#include <shellapi.h>  // Provides functions for Windows shell operations
+#define UNICODE     // Enable Unicode support for Windows API functions
+#define _UNICODE    // Enable Unicode support for C runtime functions
+
+#include <WinSock2.h>      // Provides Windows Sockets API for TCP/IP networking
+#include <windows.h>       // Core Windows API functions and types
+#include <shellapi.h>      // Shell API for ShellExecute and tray icon management
+#include <WS2tcpip.h>      // Additional TCP/IP utilities for Windows Sockets
+#include <string>          // Standard C++ string class
+#include <thread>          // C++11 threading support
+#include <iostream>        // Standard input/output stream objects
 
 // Link with the Winsock library for network functions
 #pragma comment(lib, "ws2_32.lib")
 
-const int PORT = 10709; // Server port, MUST match the one used in the client Python script (Just a random number).
-const int BUFFER_SIZE = 1024; // Size of the buffer for receiving data from the socket
 
-// Path to the PowerShell script for showing toast notifications
-const std::string TOAST_NOTIFICATION_SCRIPT_PATH = "./toast_notification.ps1";
+#define WM_APP_TRAYICON (WM_APP + 1)    // Custom Windows message identifier for tray icon events
+#define ID_TRAY_EXIT 1001               // Menu command ID for "Exit" option in tray menu
+#define ID_TRAY_SHOWHIDE 1002           // Menu command ID for "Show/Hide" option in tray menu
 
-/**
- * @brief Initializes the Winsock library for network operations.
- *
- * This function calls WSAStartup to initialize the Winsock library with version 2.2.
- * If initialization fails, an error message is printed to std::cerr.
- *
- * @return true if Winsock was successfully initialized, false otherwise.
- */
-bool InitializeWinsock() {
+// Unique identifier for the tray icon
+const UINT TRAY_UID = 1;
+
+// TCP server port number, MUST be the same as the one used in the Python script
+const int PORT = 10709;
+
+const std::string TOAST_SCRIPT = "toast_notification.ps1";  // Path to the PowerShell script for toast notifications
+const std::string TRIGGER_MSG = "DEFAULT MESSAGE";          // Message that triggers the notification
+
+NOTIFYICONDATA nid = {}; // Structure for tray icon data (initializes to zero)
+HMENU trayMenu;          // Handle for the tray icon's context menu
+HWND hwnd;               // Handle for the hidden window used for tray icon events
+
+bool showConsole = false; // Tracks whether the console window is currently shown
+bool running = true;      // Controls the main server loop; set to false to stop the server
+
+
+
+// -------------------- Utility functions --------------------
+
+void ShowToast(const std::string &title, const std::string &msg) {
+    // Build the PowerShell command line to execute the toast notification script with parameters
+    std::wstring command = L"-NoProfile -ExecutionPolicy Bypass -File \"" +
+                           std::wstring(TOAST_SCRIPT.begin(), TOAST_SCRIPT.end()) + L"\" " + // Add script path
+                           L"-Title \"" + std::wstring(title.begin(), title.end()) + L"\" " + // Add title argument
+                           L"-Message \"" + std::wstring(msg.begin(), msg.end()) + L"\"";    // Add message argument
+
+    // Launch PowerShell in hidden mode to run the toast notification script
+    ShellExecuteW(NULL, L"open", L"powershell.exe", command.c_str(), NULL, SW_HIDE);
+}
+
+void ShowConsole() {
+    // If the console is not currently shown
+    if (!showConsole) {
+        AllocConsole(); // Allocate a new console for the calling process
+        FILE* dummy;
+        freopen_s(&dummy, "CONOUT$", "w", stdout); // Redirect stdout to the new console
+        showConsole = true; // Mark that the console is now shown
+    }
+
+    ShowWindow(GetConsoleWindow(), SW_SHOW); // Make the console window visible
+    SetForegroundWindow(GetConsoleWindow()); // Bring the console window to the foreground
+}
+
+void HideConsole() {
+    // Hide the console window (if it exists)
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+}
+
+void CreateTrayIcon(HINSTANCE hInstance) {
+    nid.cbSize = sizeof(nid); // Set the size of the NOTIFYICONDATA structure
+    nid.hWnd = hwnd; // Assign the window handle to receive tray icon messages
+    nid.uID = TRAY_UID; // Set a unique identifier for the tray icon
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_INFO; // Specify which fields are valid (icon, message, tooltip, info)
+    nid.uCallbackMessage = WM_APP_TRAYICON; // Set the custom message for tray icon events
+    nid.hIcon = LoadIcon(NULL, IDI_INFORMATION); // Load a standard information icon for the tray
+    wcscpy_s(nid.szTip, ARRAYSIZE(nid.szTip), L"Raspberry Pi Server Notifier"); // Set the tooltip text for the tray icon
+    Shell_NotifyIcon(NIM_ADD, &nid); // Add the tray icon to the system tray
+
+    // Menu
+    trayMenu = CreatePopupMenu(); // Create a popup menu for the tray icon
+    AppendMenuW(trayMenu, MF_STRING, ID_TRAY_SHOWHIDE, L"Show/Hide console window"); // Add "Show/Hide" option to the tray menu
+    AppendMenuW(trayMenu, MF_STRING, ID_TRAY_EXIT, L"Stop server notifier"); // Add an "Exit" option to the tray menu
+}
+
+void RemoveTrayIcon() {
+    // Remove the tray icon from the system tray
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+
+    // Destroy the tray icon's context menu to free resources
+    DestroyMenu(trayMenu);
+}
+
+
+// -------------------- TCP Server --------------------
+
+void TcpServerThread() {
+    std::cout << "- TCP Server thread started." << std::endl;
+
+    // Structure to hold information about the Windows Sockets implementation
     WSADATA wsaData;
 
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    // Socket handles for the server and client, initialized to invalid value
+    SOCKET serverSocket = INVALID_SOCKET, clientSocket = INVALID_SOCKET;
 
-    if (iResult != 0) {
-        std::cerr << "> WSAStartup failed! " << iResult << std::endl;
-        return false;
-    }
+    // Initialize Winsock version 2.2 for network communication
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-    return true;
-}
+    // Create a new socket for the server using IPv4 (AF_INET), TCP (SOCK_STREAM), and TCP protocol (IPPROTO_TCP)
+    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-/**
- * @brief Displays a toast notification on Windows using a PowerShell script.
- *
- * This function constructs a command to execute a PowerShell script that shows a toast notification
- * with the specified title and message. The script path is defined by TOAST_NOTIFICATION_SCRIPT_PATH.
- *
- * @param title   The title of the toast notification.
- * @param message The message content of the toast notification.
- */
-void ShowToastNotification(const std::string& title, const std::string& message) {
-    // Path to the PowerShell script for toast notifications
-    std::string powershellScriptPath = TOAST_NOTIFICATION_SCRIPT_PATH;
+    // Create and initialize the sockaddr_in structure for the server address
+    sockaddr_in addr{};                  // Zero-initialize the address structure
+    addr.sin_family = AF_INET;           // Set address family to IPv4
+    addr.sin_port = htons(PORT);         // Set the port number (convert to network byte order)
+    addr.sin_addr.s_addr = INADDR_ANY;   // Accept connections from any network interface
 
-    // Convert std::string to std::wstring for ShellExecuteW (which expects wide strings)
-    std::wstring ws_powershellScriptPath(powershellScriptPath.begin(), powershellScriptPath.end());
-    std::wstring ws_title(title.begin(), title.end());
-    std::wstring ws_message(message.begin(), message.end());
+    // Bind the server socket to the specified address and port
+    bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
 
-    // Build the PowerShell command-line arguments to pass to ShellExecuteW.
-    // -NoProfile: Prevents loading the user's profile to speed up execution.
-    // -ExecutionPolicy Bypass: Allows running scripts regardless of policy.
-    // -File: Specifies the script file to run.
-    // -Title and -Message: Custom parameters for the toast notification.
-    std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" +
-                        ws_powershellScriptPath + L"\" -Title \"" + ws_title +
-                        L"\" -Message \"" + ws_message + L"\"";
-    
-    // Execute the PowerShell script to show the toast notification (runs hidden)
-    ShellExecuteW(NULL, L"open", L"powershell.exe", args.c_str(), NULL, SW_HIDE);
-}
+    // Start listening for incoming connections (backlog set to 1)
+    listen(serverSocket, 1);
 
-/**
- * @brief Entry point for the server notifier application.
- *
- * This function initializes the Winsock library and sets up a TCP server socket
- * that listens for incoming connections on a specified port. When a client connects,
- * it receives a message and checks if the message is "BTN_PRESSED". If so, it triggers
- * a toast notification to alert the user. The server handles errors gracefully, prints
- * informative messages, and cleans up resources before exiting.
- *
- * @return int Returns 0 on successful execution, or 1 if an error occurs during initialization or socket setup.
- */
-int main() {
-    // Initialize Winsock library; exit if initialization fails
-    if (!InitializeWinsock())
-        return 1;
-    
-    SOCKET server_fd, new_socket; // Server socket and client socket descriptors
-    struct sockaddr_in address;   // Structure to hold server address information
-    int addrlen = sizeof(address); // Length of the address structure
-    char buffer[BUFFER_SIZE] = {0}; // Buffer for receiving data from the client
+    std::cout << "- Server listening on port: " << PORT << std::endl;
 
-    
-    // Create a TCP socket for the server
-    server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    while (running) {
+        sockaddr_in clientAddr; // Structure to hold the client's address information
+        int len = sizeof(clientAddr); // Variable to store the size of the client address structure
+        clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &len); // Accept an incoming connection and fill clientAddr with the client's info
 
-    if (server_fd == INVALID_SOCKET) {
-        // Print error if socket creation fails and clean up Winsock
-        std::cerr << "> Error creating socket: " << WSAGetLastError() << std::endl;
-        WSACleanup();
-        return 1;
-    }
+        // Check if the accepted client socket is invalid (error occurred)
+        if (clientSocket == INVALID_SOCKET) {
+            // Print an error message to the console
+            std::cout << "> Error accepting connection." << std::endl;
 
-
-    // Set socket options to allow address reuse (SO_REUSEADDR)
-    int opt = 1;
-
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)) == SOCKET_ERROR) {
-        // Print error if setsockopt fails, close socket, and clean up Winsock
-        std::cerr << "> setsockopt failed: " << WSAGetLastError() << std::endl;
-        closesocket(server_fd);
-        WSACleanup();
-        return 1;
-    }
-
-    address.sin_family = AF_INET;           // Set address family to IPv4
-    address.sin_addr.s_addr = INADDR_ANY;   // Accept connections from any network interface
-    address.sin_port = htons(PORT);         // Set port number (convert to network byte order)
-
-    // Bind the socket to the specified address and port
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR) {
-        // Print error if bind fails, close socket, and clean up Winsock
-        std::cerr << "> Bind failed: " << WSAGetLastError() << ". There might be another process listening on the port: " << PORT << std::endl;
-        closesocket(server_fd);
-        WSACleanup();
-        return 1;
-    }
-
-    // Start listening for incoming connections (max 3 in the queue)
-    if (listen(server_fd, 3) == SOCKET_ERROR) {
-        std::cerr << "> Listen failed: " << WSAGetLastError() << std::endl;
-        closesocket(server_fd);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "> Server listening on port: " << PORT << std::endl;
-
-    while (true) {
-        // Accept an incoming client connection
-        new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
-        if (new_socket == INVALID_SOCKET) {
-            // Print error if accept fails and continue to wait for other connections
-            std::cerr << "> Accept failed: " << WSAGetLastError() << std::endl;
-            continue; // Wait for other connections
+            // Continue to the next iteration to accept another connection
+            continue;
         }
 
-        std::cout << "> Connection accepted from " << inet_ntoa(address.sin_addr) << ":" << ntohs(address.sin_port) << std::endl;
+        std::cout << "> Connection from " << inet_ntoa(clientAddr.sin_addr) << std::endl;
 
-        // Reads data from the socket 'new_socket' into 'buffer', up to (BUFFER_SIZE - 1) bytes.
-        // The '-1' ensures there is space left in the buffer for a null terminator.
-        int valread = recv(new_socket, buffer, BUFFER_SIZE - 1, 0);
-        if (valread > 0) {
-            buffer[valread] = '\0'; // Add the null terminator.
+        char buffer[1024];   // Buffer to store incoming data from the client
+        int bytesRead;       // Variable to hold the number of bytes read from the client socket
 
-            std::string received_message(buffer);
-            std::cout << "> Message received: '" << received_message << "'\n";
+        // Continuously receive data from the connected client while running
+        while ((bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0)) > 0 && running) {
+            buffer[bytesRead] = '\0'; // Null-terminate the received data to make it a valid C-string
+            std::string msg(buffer);   // Convert the buffer to a C++ string
 
-            if (received_message == "BTN_PRESSED") {
-                ShowToastNotification("Raspberry Pi Alert.", "The button has been pressed!");
-            } else {
-                std::cout << "> Unknown message: '" << received_message << "'\n";
+            // Check if the received message matches the trigger message
+            if (msg == TRIGGER_MSG) {
+                std::cout << "> Message received: " << msg << std::endl; // Log the received message to the console
+                ShowToast("Raspberry Pi", "Button pressed!");            // Show a toast notification
             }
-        } else if (valread == 0) {
-            std::cout << "> Client disconnected.\n";
-        } else {
-            std::cout << "> Receive error: " << WSAGetLastError() << std::endl;
         }
 
-        closesocket(new_socket); // Close the client socket
+        std::cout << "> Connection closed!" << std::endl;
+        closesocket(clientSocket); // Close the client socket after the connection ends
+        }
+
+        closesocket(serverSocket); // Close the server socket when the server loop ends
+        WSACleanup();              // Clean up Winsock resources before exiting
+}
+
+
+// -------------------- Invisible window + tray --------------------
+
+// Window procedure to handle messages for the hidden window
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_APP_TRAYICON: // Custom message for tray icon events
+            switch (lParam) {
+                case WM_LBUTTONUP: // Left mouse button released on tray icon
+                    ShowConsole(); // Show the console window
+                    break;
+                case WM_RBUTTONUP: // Right mouse button released on tray icon
+                    POINT pt; // Structure to hold cursor position
+                    GetCursorPos(&pt); // Get current cursor position
+                    SetForegroundWindow(hwnd); // Bring the hidden window to foreground (required for menu)
+
+                    // Show the tray icon's context menu at the cursor position
+                    TrackPopupMenu(trayMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
+                    break;
+            }
+            break;
+        
+        case WM_COMMAND: // Menu command received
+            if (LOWORD(wParam) == ID_TRAY_EXIT) { // If "Exit" menu item selected
+                // Signal to quit the application (posts WM_QUIT to the message loop)
+                PostQuitMessage(0); 
+            } else if (LOWORD(wParam) == ID_TRAY_SHOWHIDE) {
+                // Toggle the visibility of the console window
+                if (!showConsole) {
+                    HideConsole(); // Hide the console if currently shown
+                    showConsole = true;
+                } else {
+                    ShowConsole(); // Show the console if currently hidden
+                    showConsole = false;
+                }
+            }
+            break;
+        
+        case WM_CLOSE: // Window close event
+            HideConsole(); // Hide the console window (does not exit the app)
+            return 0; // Prevent default close behavior
     }
 
-    closesocket(server_fd);
-    WSACleanup();
-    return 0;
+    // Default message handling for unprocessed messages
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+void RunTrayApp(HINSTANCE hInstance) {
+    ShowConsole(); // Show the console window (for debugging/logging)
+    HideConsole(); // Immediately hide the console window (start hidden)
+
+    std::cout << "- Program starting up..." << std::endl; // Log startup message
+
+    const wchar_t CLASS_NAME[] = L"HiddenWindowClass"; // Name for the hidden window class
+
+    WNDCLASS wc = {}; // Structure to define window class properties
+    wc.lpfnWndProc = WindowProc; // Set the window procedure callback
+    wc.hInstance = hInstance;    // Set the application instance handle
+    wc.lpszClassName = CLASS_NAME; // Set the window class name
+
+    RegisterClass(&wc); // Register the window class with the OS
+
+    // Create the hidden window (used for tray icon events)
+    hwnd = CreateWindowExW(0, CLASS_NAME, L"", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+
+    CreateTrayIcon(hInstance); // Add the tray icon to the system tray
+
+    std::thread serverThread(TcpServerThread); // Start the TCP server in a separate thread
+    serverThread.detach(); // Detach the thread so it runs independently
+
+    MSG msg; // Message structure for the Windows message loop
+
+    // Main message loop: process messages for the hidden window
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg); // Translate messages
+        DispatchMessage(&msg);  // Dispatch messages to the window procedure
+    }
+
+    running = false; // Signal the server thread to stop
+    RemoveTrayIcon(); // Remove the tray icon from the system tray
+}
+
+
+// -------------------- Entry point --------------------
+
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    // Entry point for Windows applications (WinMain)
+    RunTrayApp(hInstance); // Start the tray application and TCP server
+    return 0; // Return exit code 0 (success)
 }

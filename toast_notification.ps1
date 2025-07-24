@@ -26,4 +26,4 @@ $xml.SelectSingleNode("//text[@id='2']").InnerText = $Message
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 
 # Display the toast notification using a custom notifier name
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("MyRaspberryPiNotifier").Show($toast)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Raspberry Pi Notifier").Show($toast)
